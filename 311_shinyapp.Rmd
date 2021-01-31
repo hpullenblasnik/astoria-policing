@@ -1,0 +1,567 @@
+---
+title: "AD36 311 Calls"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: bootstrap
+    css: styles.css
+---
+
+```{r global, include=FALSE}
+# Import libraries needed 
+library(flexdashboard)
+library(leaflet)
+library(plotly)
+library(sf)
+library(tidyverse)
+library(stringr) # for str_detect
+library(scales) # for percent
+library(DT)
+library(gridExtra)
+
+
+setwd("~/Documents/Work/Volunteer/astoria_policing/")
+data_folder <- "~/Documents/Work/Volunteer/astoria_policing/"
+
+df <- read_csv(paste0(data_folder, "clean_block_calls.csv")) %>%
+  mutate_at(vars(cbBCTCB2010, cre_year, zip), as.character) %>%
+  mutate(channel=str_to_title(channel))
+
+st_distinct <- df %>% select(clean_street) %>% distinct() %>% filter(!is.na(clean_street))
+
+complaint_list <- df %>%
+    select(complaint_simplified) %>%
+    distinct() %>% 
+    filter(!is.na(complaint_simplified)) %>% 
+    pull(complaint_simplified) 
+
+location_list <- df %>%
+    select(location_simplified) %>%
+    distinct() %>%
+    filter(!is.na(location_simplified)) %>%
+    pull(location_simplified)
+
+full_df <- read_csv(paste0(data_folder, "311_ad36_2021_clean.csv"))
+
+dateRangeInput2 <- function(inputId, label, minview = "days", maxview = "decades", ...) {
+  d <- shiny::dateRangeInput(inputId, label, ...)
+  d$children[[2L]]$children[[1]]$attribs[["data-date-min-view-mode"]] <- minview
+  d$children[[2L]]$children[[3]]$attribs[["data-date-min-view-mode"]] <- minview
+  d$children[[2L]]$children[[1]]$attribs[["data-date-max-view-mode"]] <- maxview
+  d$children[[2L]]$children[[3]]$attribs[["data-date-max-view-mode"]] <- maxview
+  d
+}
+```
+
+```{r data prep, include=F}
+start_date <- min(df$cre_dt)
+end_date <- max(df$cre_dt)
+
+features_available <- c("Complaint Type" = "complaint_simplified",
+                        "Location Type" = "location_simplified",
+                        "Year" = "cre_year",
+                        "Month" = "cre_month",
+                        "Hour" = "cre_hr",
+                        "Zip Code" = "zip",
+                        "Neighborhood" = "city",
+                        "Complaint Status" = "Status",
+                        "Channel" = "channel"
+                        )
+
+trend_features <- c("Complaint Type" = "complaint_simplified",
+                    "Location Type" = "location_simplified",
+                    "Zip Code" = "zip",
+                    "Neighborhood" = "city",
+                    "Complaint Status" = "Status",
+                    "Channel" = "channel"
+                    )
+
+map_features <- c("Count Calls" = "Count")
+
+
+
+shapefile <- st_read(
+  dsn = paste0(data_folder, "nycb2010_20d"), 
+  layer = "blocks_ad36_311counts",
+  stringsAsFactors = FALSE
+)
+```
+
+Sidebar {.sidebar}
+============================================================================
+
+```{r}
+# DATE RANGE
+# Filter dates, find a better way to do this?
+output$date_range <- renderUI({
+  dateRangeInput2("date_range", "Date Range", start = start_date, end = end_date, 
+               format = "mm-dd-yyyy", startview = "year", minview="days", maxview="years")
+})
+uiOutput("date_range")
+```
+
+##### Filters
+
+```{r}
+output$business <- renderUI({
+  checkboxGroupInput("business", label=NULL,
+                     choices=c("Business" = 1,"Non-Business" = 0), 
+                     selected=c(1, 0), inline=TRUE)
+})
+uiOutput("business")
+
+
+output$street_name <- renderUI({
+  req(st_distinct)
+  
+  selectizeInput("street_name", label = NULL,
+            choices = st_distinct$clean_street,
+            selected = NULL, 
+            multiple = TRUE,
+            options = list(placeholder = "Select Street Name(s)"))
+})
+uiOutput("street_name")
+```
+
+```{r}
+### DATA PREP BASED ON SIDEBAR ###
+filter_df <- reactive({
+  req(input$business)
+  req(input$date_range)
+  req(df)
+  
+  start_date <- input$date_range[1]
+  end_date <- input$date_range[2]
+  
+  filter_data <- df %>% 
+    filter(cre_dt >= start_date & cre_dt <= end_date) %>%
+    filter((as.numeric(business_loc) %in% as.numeric(input$business)))
+  
+  if (is.null(input$street_name)) {
+    filter_data <- filter_data
+  } else {
+    filter_data <- filter_data %>%
+      filter(clean_street %in% input$street_name)
+  }
+  
+  filter_data
+})
+```
+
+```{r}
+### DATA PREP FOR COMPARISON DATA ###
+filter_full <- reactive({
+  req(input$business)
+  req(input$date_range)
+  req(full_df)
+  
+  start_date <- input$date_range[1]
+  end_date <- input$date_range[2]
+  
+  filter_data <- full_df %>% 
+    filter(cre_dt >= start_date & cre_dt <= end_date) %>%
+    filter((as.numeric(business_loc) %in% as.numeric(input$business)))
+  
+  
+  if (is.null(input$street_name)) {
+    filter_data <- filter_data
+  } else {
+    filter_data <- filter_data %>%
+      filter(clean_street %in% input$street_name)
+  }
+  
+  filter_data
+})
+```
+
+```{r}
+### PREPARING DATA FOR MAPPING ###
+map_data <- reactive({
+  req(filter_df())
+  req(shapefile)
+  
+  filter_data <- filter_df()
+
+
+  if (is.null(input$complaint_filter)) {
+    filter_data <- filter_data
+  } else {
+    filter_data <- filter_data %>%
+      filter(complaint_simplified %in% input$complaint_filter)
+  }
+  
+  if (is.null(input$location_filter)) {
+    filter_data <- filter_data
+  } else {
+    filter_data <- filter_data %>%
+      filter(location_simplified %in% input$location_filter)
+  }
+
+  group_data <- filter_data %>%
+    group_by(cbBCTCB2010) %>%
+    summarize(Count=n())
+
+  mapping_data <- shapefile %>%
+    inner_join(group_data, by=c("BCTCB2010"="cbBCTCB2010")) %>%
+    st_transform(4326) # to work with leaflet, but really want it in NAD83 projection :(
+  #"+proj=utm +zone=19 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+
+  mapping_data
+})
+```
+
+
+Summary {data-icon="fa-chart-bar"}
+=======================================================================
+
+Row {data-height=275}
+-----------------------------------------------------------------------
+
+### NYPD 311 Calls
+
+```{r}
+output$calls_pretty <- renderValueBox({
+  req(filter_df())
+  
+  nypd_count <- filter_df() %>% select(id) %>% distinct() %>% count() %>% ungroup() %>% pull(n)
+  
+  valueBox(format(nypd_count, big.mark = ','),
+           icon = "fa-phone", color = "#BDC8DB")
+  })
+valueBoxOutput("calls_pretty")
+```
+
+### Proportion NYPD of Total 311 Calls 
+
+```{r}
+output$nypd_gauge <- renderGauge({
+  req(filter_df())
+  req(filter_full())
+  
+  nypd_count <- filter_df() %>% select(id) %>% distinct() %>% count() %>% ungroup() %>% pull(n)
+  
+  full_count <- filter_full() %>% select(id) %>% distinct() %>% count() %>% ungroup() %>% pull(n)
+  
+  
+  gauge(round((nypd_count/full_count)*100, digits=1), 
+        min=0, max=100, 
+        sectors = gaugeSectors(success=c(0, 25), warning=c(25, 50), danger=c(50, 100), 
+                               colors = c("#007C34", "#DA771D", "#AA000C")), 
+        symbol="%")
+  })
+gaugeOutput("nypd_gauge")
+```
+
+
+Row {data-height=75}
+-----------------------------------------------------------------------
+
+```{r}
+# Choose metric
+output$summary_metric <- renderUI({
+  selectInput("summary_metric", label = "Metric:",
+            choices = features_available,
+            selected = features_available[1])
+})
+uiOutput("summary_metric")
+```
+
+Row {data-height=650}
+-----------------------------------------------------------------------
+
+```{r}
+format_ticks <- function(start_values) {
+  return(ifelse(start_values >= 1000000, paste0(start_values/1000000, 'M'),
+                  ifelse(start_values >= 1000, paste0(start_values/1000, 'K'), start_values)))
+}
+
+
+## FIX X AXIS - NUMBERS INSTEAD OF NAMES????
+output$summary_graph <- renderPlotly({
+  req(filter_df())
+  req(input$summary_metric)
+  
+  val <- input$summary_metric
+  
+  data_source <- filter_df() %>%
+    group_by(get(val)) %>%
+    summarize(Count=n()) %>%
+    ungroup() %>%
+    rename(!!val := `get(val)`)
+  
+  plot_ly(data_source, 
+          type="bar", 
+          x=~get(val), 
+          y=~Count, 
+          color=~get(val)) %>%
+    layout(showlegend = FALSE,
+           xaxis = list(title=names(which(features_available == val))))
+  
+})
+plotlyOutput("summary_graph")
+```
+
+
+Trends {data-icon="fa-line-chart"}
+=======================================================================
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+
+```{r}
+output$time_group <- renderUI({
+  selectInput("time_group", label = "Time Grouping:",
+            choices = c("Day", "Month", "Year"),
+            selected = "Month")
+})
+uiOutput("time_group")
+```
+
+```{r}
+# Choose metric
+output$trend_metric <- renderUI({
+  selectInput("trend_metric", label = "Trended Metric:",
+            choices = trend_features,
+            selected = trend_features[1])
+})
+uiOutput("trend_metric")
+```
+
+
+Row {data-height=850}
+-----------------------------------------------------------------------
+
+```{r}
+# Trended Graph
+
+output$trended_graph <- renderPlotly({
+  req(filter_df())
+  req(input$trend_metric)
+  req(input$time_group)
+  
+  val <- input$trend_metric
+  grouping <- input$time_group
+  
+  if (grouping=="Month"){
+    data_source <- filter_df() %>% 
+      mutate(Date=as.Date(paste0(cre_month, "-01-", cre_year), format="%m-%d-%Y"))
+  } else if (grouping=="Day") {
+    data_source <- filter_df() %>%
+      mutate(Date=cre_dt)
+  } else {
+    data_source <- filter_df() %>%
+      mutate(Date=cre_year)
+  }
+  
+  data_source <- data_source %>%
+    group_by(Date, get(val)) %>%
+    summarize(Count=n()) %>%
+    ungroup() %>%
+    rename(!!val := `get(val)`)
+  
+  plot_ly(data_source, type = 'scatter', mode = 'lines',
+          x=~Date, 
+          y=~Count, 
+          color=~get(val),
+          text=~get(val),
+          hovertemplate = paste('%{text}', '%{x}', '%{y}')) %>%
+    layout(legend = list(orientation = 'h', xanchor = "center", x = 0.5, y=-0.3),
+           xaxis = list(title=names(which(trend_features == val))))
+  
+})
+plotlyOutput("trended_graph")
+```
+
+Map {data-icon="fa-globe"}
+============================================================================
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+
+```{r}
+# METRIC DROP DOWN
+output$map_feature <- renderUI({
+  selectInput("map_feature", label = "Census Block Fill:",
+            choices = map_features,
+            selected = map_features[1])
+})
+uiOutput("map_feature")
+```
+
+```{r}
+output$complaint_filter <- renderUI({
+  req(complaint_list)
+
+  selectizeInput("complaint_filter", label = "Complaint Filter:",
+            choices = complaint_list,
+            selected = NULL, 
+            multiple = TRUE,
+            options = list(placeholder = "Select Complaint Type(s)"))
+})
+uiOutput("complaint_filter")
+```
+
+```{r}
+output$location_filter <- renderUI({
+  req(location_list)
+
+  selectizeInput("location_filter", label = "Location Filter:",
+            choices = location_list,
+            selected = NULL, 
+            multiple = TRUE,
+            options = list(placeholder = "Select Location Type(s)"))
+})
+uiOutput("location_filter")
+```
+
+Row {data-height=850}
+-----------------------------------------------------------------------
+
+### Map
+
+```{r}
+# Create the base map that shouldn't have to change
+output$map <- renderLeaflet({
+  leaflet() %>%
+    addProviderTiles(providers$CartoDB.Positron, 
+                     options = providerTileOptions(updateWhenZooming = FALSE, updateWhenIdle = TRUE)) %>%
+    setView(lng = -73.92, lat = 40.77, zoom = 13.45) %>%
+    toWebGL()
+})
+leafletOutput("map")
+```
+
+```{r}
+colorpal <- reactive({
+  req(map_data())
+  req(input$map_feature)
+  
+  map_data <- map_data()
+  selected_feature <- input$map_feature
+  
+  my_feature <- get(selected_feature, map_data)
+  my_feature <- my_feature[!is.na(my_feature) & is.finite(my_feature)]
+  
+  my_bins <- c(quantile(my_feature, c(0, 0.2, 0.4, 0.6, 0.8, 1), na.rm=TRUE))
+  
+  my_bins <- my_bins[!duplicated(my_bins)]
+
+  print(my_bins)
+
+  colorBin(palette = "Spectral", bins = my_bins, reverse = TRUE, na.color = "#F5F8FF",
+               domain = c(min(get(selected_feature, map_data)), max(get(selected_feature, map_data))))
+  #colorQuantile(palette = "Spectral", domain = get(selected_feature, map_data), n = 5, reverse = TRUE)
+  })
+```
+
+ 
+```{r}
+# Use observers for adding the layers
+
+# For changing the zip codes
+observe({
+  req(colorpal())
+  req(input$map_feature)
+  req(map_data())
+  
+  pal <- colorpal()
+  selected_feature <- input$map_feature
+  map_data <- map_data()
+
+  leafletProxy("map") %>%
+    clearGroup(group = "Census Blocks") %>%
+    addPolygons(
+      data = map_data,
+      fillColor = ~pal(get(selected_feature, map_data)), ## For pal
+      fillOpacity = 0.5,
+      stroke=FALSE,
+      smoothFactor = 0.2,
+      layerId = ~BCTCB2010,
+      group = "Census Blocks",
+      popup = ~paste0("<strong>Census Block: </strong>", BCTCB2010, 
+                 # "<br><strong>Zip Code: </strong>", zip,
+                #  "<br><strong>Neighborhood: </strong>", city,
+                  "<br><strong>Selected Metric: </strong>", get(selected_feature, map_data))
+    ) %>%
+    addLegend(pal = pal, values = get(selected_feature, map_data), position = "bottomright", 
+              title = names(which(map_features == selected_feature)), layerId="map_legend")
+})
+```
+
+
+Details {data-icon="fa-table"}
+=======================================================================
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+
+```{r}
+output$complaint_filter2 <- renderUI({
+  req(complaint_list)
+
+  selectizeInput("complaint_filter2", label = "Complaint Filter:",
+            choices = complaint_list,
+            selected = NULL, 
+            multiple = TRUE,
+            options = list(placeholder = "Select Complaint Type(s)"))
+})
+uiOutput("complaint_filter2")
+```
+
+```{r}
+output$location_filter2 <- renderUI({
+  req(location_list)
+
+  selectizeInput("location_filter2", label = "Location Filter:",
+            choices = location_list,
+            selected = NULL, 
+            multiple = TRUE,
+            options = list(placeholder = "Select Location Type(s)"))
+})
+uiOutput("location_filter2")
+```
+
+Row {data-height=850}
+-----------------------------------------------------------------------
+
+```{r}
+details_df <- reactive({
+  req(filter_df())
+  
+  filter_data <- filter_df()
+  
+  if (is.null(input$complaint_filter2)) {
+    filter_data <- filter_data
+  } else {
+    filter_data <- filter_data %>%
+      filter(complaint_simplified %in% input$complaint_filter2)
+  }
+  
+  if (is.null(input$location_filter2)) {
+    filter_data <- filter_data
+  } else {
+    filter_data <- filter_data %>%
+      filter(location_simplified %in% input$location_filter2)
+  }
+  
+  
+  filter_data <- filter_data[c("cre_dt", "city", "zip", "location_simplified", "complaint_simplified", "Descriptor", "Resolution.Description")]
+  names(filter_data) <- c("Date", "City", "Zip Code", "Location", "Complaint", "Complaint Details", "Resolution")
+  
+  
+  filter_data
+  
+})
+
+
+output$details_table <- renderDataTable({
+  req(details_df())
+  
+  details_df() %>% datatable() #%>% formatPercentage('Cancellation Rate', 2) %>% formatCurrency('Total Sales') %>% formatRound('Avg Rating', 2)
+  
+})
+dataTableOutput("details_table")
+```
+
