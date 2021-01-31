@@ -22,8 +22,7 @@ library(DT)
 library(gridExtra)
 
 
-setwd("~/Documents/Work/Volunteer/astoria_policing/")
-data_folder <- "~/Documents/Work/Volunteer/astoria_policing/"
+data_folder <- "data/"
 
 df <- read_csv(paste0(data_folder, "clean_block_calls.csv")) %>%
   mutate_at(vars(cbBCTCB2010, cre_year, zip), as.character) %>%
@@ -83,7 +82,7 @@ map_features <- c("Count Calls" = "Count")
 
 
 shapefile <- st_read(
-  dsn = paste0(data_folder, "nycb2010_20d"), 
+  dsn = paste0(data_folder, "shapefile"), 
   layer = "blocks_ad36_311counts",
   stringsAsFactors = FALSE
 )
