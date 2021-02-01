@@ -1,15 +1,25 @@
 ---
-title: "AD36 311 Calls"
+title: 'NY State Assembly District 36: Policing Overview'
+resource_files:
+- data/311_ad36_2021_clean.csv
+- data/clean_block_calls.csv
+- data/shapefile/blocks_ad36_311counts.cpg
+- data/shapefile/blocks_ad36_311counts.dbf
+- data/shapefile/blocks_ad36_311counts.prj
+- data/shapefile/blocks_ad36_311counts.qpj
+- data/shapefile/blocks_ad36_311counts.shp
+- data/shapefile/blocks_ad36_311counts.shx
 runtime: shiny
-output: 
+output:
   flexdashboard::flex_dashboard:
-    orientation: rows
-    vertical_layout: fill
-    theme: bootstrap
     css: styles.css
+    orientation: rows
+    theme: bootstrap
+    vertical_layout: fill
 ---
 
 ```{r global, include=FALSE}
+#bootstrap, spacelab alternate theme
 # Import libraries needed 
 library(flexdashboard)
 library(leaflet)
@@ -20,7 +30,7 @@ library(stringr) # for str_detect
 library(scales) # for percent
 library(DT)
 library(gridExtra)
-
+#library(rsconnect)
 
 data_folder <- "data/"
 
@@ -91,17 +101,28 @@ shapefile <- st_read(
 Sidebar {.sidebar}
 ============================================================================
 
+#### 311 Calls to NYPD
+
+311 Call Data is downloaded from the NYC Open Data Portal. Data here covers 2017-2020 for calls directed to the NYPD in AD 36.
+
+
+
+##### Date Range
+
 ```{r}
 # DATE RANGE
 # Filter dates, find a better way to do this?
 output$date_range <- renderUI({
-  dateRangeInput2("date_range", "Date Range", start = start_date, end = end_date, 
+  dateRangeInput2("date_range", label=NULL, #"Date Range", 
+                  start = start_date, end = end_date, 
                format = "mm-dd-yyyy", startview = "year", minview="days", maxview="years")
 })
 uiOutput("date_range")
 ```
 
-##### Filters
+
+
+##### Business-Related Call
 
 ```{r}
 output$business <- renderUI({
@@ -110,8 +131,13 @@ output$business <- renderUI({
                      selected=c(1, 0), inline=TRUE)
 })
 uiOutput("business")
+```
 
 
+
+##### Specific Streets
+
+```{r}
 output$street_name <- renderUI({
   req(st_distinct)
   
@@ -123,6 +149,7 @@ output$street_name <- renderUI({
 })
 uiOutput("street_name")
 ```
+
 
 ```{r}
 ### DATA PREP BASED ON SIDEBAR ###
@@ -227,7 +254,7 @@ output$calls_pretty <- renderValueBox({
   nypd_count <- filter_df() %>% select(id) %>% distinct() %>% count() %>% ungroup() %>% pull(n)
   
   valueBox(format(nypd_count, big.mark = ','),
-           icon = "fa-phone", color = "#BDC8DB")
+           icon = "fa-phone" )#, color = "#BDC8DB")
   })
 valueBoxOutput("calls_pretty")
 ```
@@ -562,5 +589,9 @@ output$details_table <- renderDataTable({
   
 })
 dataTableOutput("details_table")
+```
+
+```{r}
+#rsconnect::deployApp()
 ```
 
